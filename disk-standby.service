@@ -1,0 +1,7 @@
+[Unit]
+Description=Disk Standby Timeout config load
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/disk-standby --load

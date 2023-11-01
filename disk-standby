@@ -1,0 +1,254 @@
+#!/bin/bash
+
+#set -x
+
+stdby_file="/var/lib/hdparm/disk-standby"
+
+default_timeout=180
+timeout=0
+
+getopt=$(which getopt)
+
+if [[ -z "$getopt" ]]; then
+    echo "Install getopt."
+    exit 1
+fi
+
+OPTS=$(getopt -o s:dlh --long set:,show,del,delete,load,help -- "$@")
+if [ $? != 0 ] ; then echo "Terminating..." >&2 ; exit 1 ; fi
+eval set -- "$OPTS"
+
+usage()
+{
+    echo "Usage: $0 [-l|--load] [-s|--set <0..254> <DISK_SERIAL> [DISK_SERIAL..]] [--delete|--del|-d <DISK_SERIAL> [DISK_SERIAL..]] [-h|--help]" 1>&2
+    echo
+    echo "Setting or loading disk standby timeouts"
+    echo
+    echo "Options:"
+    echo -e " --show\t\tShow current standby timeouts for a specific disk or all."
+    echo -e " -l, --load\t\tLoad all saved configurations."
+    echo -e " -s, --set\t\tSet and save timeout for a specific disk or multiple disks."
+    echo -e "\t\t\tA value of 0 means \"timeouts are disabled.\": the device will not automatically enter standby mode."
+    echo -e "\t\t\tValues from 1 to 240 specify multiples of 5 seconds, yielding timeouts from 5 seconds to 20 minutes."
+    echo -e "\t\t\tValues from 241 to 251 specify from 1 to 11 units of 30 minutes, yielding timeouts from 30 minutes to 5.5 hours."
+    echo -e "\t\t\tA value of 252 signifies a timeout of 21 minutes."
+    echo -e "\t\t\tA value of 253 sets a vendor-defined timeout period between 8 and 12 hours."
+    echo -e "\t\t\tValue 254 is reserved"
+    echo -e "\t\t\tValue 255 is interpreted as 21 minutes plus 15 seconds."
+    echo -e " -d, --del, --delete\tDelete timeout from config for a specific disk or multiple disks and set value to 253."
+    echo
+    echo -e " <DISK_SERIAL> [DISK_SERIAL..] must be a string in format listed in /dev/disk/by-id/"
+    exit 1
+}
+
+save_disk_timeout()
+{
+    DISK=$1
+    stdby_path=$(dirname $stdby_file)
+    if [[ ! -d $stdby_path ]]; then
+	mkdir -p $stdby_path
+	touch $stdby_file
+    fi
+    if grep -q "$DISK" $stdby_file; then
+	# Replace current value with new value
+	sed -i "s/.*$DISK.*/$DISK,$timeout/g" $stdby_file
+    else
+	# Add new disk and timeout
+	echo "$DISK,$timeout" >> $stdby_file
+    fi
+}
+
+timeout_to_human_readable()
+{
+    TIMEOUT=$1
+    if [[ "$TIMEOUT" -eq 0 ]]; then
+	s_OUT="disabled"
+    fi
+    if [[ "$TIMEOUT" -ge 1 && "$TIMEOUT" -le 240 ]]; then
+	TIMEOUT_s=$(($TIMEOUT*5))
+	if [[ "$TIMEOUT_s" -gt 60 ]]; then
+	    TIMEOUT_m=$((TIMEOUT_s/60))
+	    TIMEOUT_s=$((TIMEOUT_s-(TIMEOUT_m*60)))
+	    s_OUT="${TIMEOUT_m}m"
+	    if [[ "$TIMEOUT_s" -gt 0 ]]; then
+		s_OUT=$s_OUT" + ${TIMEOUT_s}s"
+	    fi
+	else
+	    s_OUT="${TIMEOUT_s}s"
+	fi
+    fi
+    if [[ "$TIMEOUT" -ge 241 && "$TIMEOUT" -le 251 ]]; then
+	TIMEOUT_m=$(((TIMEOUT-240)*30))
+	if [[ "$TIMEOUT_m" -ge 60 ]]; then
+	    TIMEOUT_h=$((TIMEOUT_m/60))
+	    TIMEOUT_m=$((TIMEOUT_m-(TIMEOUT_h*60)))
+	    s_OUT="$TIMEOUT_h"
+	    if [[ "$TIMEOUT_m" -gt 0 ]]; then
+		s_OUT=$s_OUT".5h"
+	    else
+		s_OUT=$s_OUT"h"
+	    fi
+	else
+	    s_OUT="${TIMEOUT_m}m"
+	fi
+    fi
+    if [[ "$TIMEOUT" -eq 252 ]]; then
+	s_OUT="21m"
+    fi
+    if [[ "$TIMEOUT" -eq 253 ]]; then
+	s_OUT="vendor specific"
+    fi
+    if [[ "$TIMEOUT" -eq 254 ]]; then
+	s_OUT="rsvd value 254"
+    fi
+    if [[ "$TIMEOUT" -eq 255 ]]; then
+	s_OUT="21m + 15s"
+    fi
+    echo $s_OUT
+}
+
+set_disk_timeout()
+{
+    DISK=$1
+    TIMEOUT=$2
+
+    TimeOutHum=$(timeout_to_human_readable $TIMEOUT)
+    echo "Set disk $DISK timeout to $TimeOutHum"
+
+    hdparm -q -S $TIMEOUT /dev/disk/by-id/$DISK
+
+    if [[ $? -ne 0 ]]; then
+	echo "Error setting timeout for disk $DISK."
+	return 1
+    else
+	return 0
+    fi
+}
+
+set_disks_timeout()
+{
+    echo "Timeout: $timeout"
+    for DISK in $@; do 
+	#echo $disk
+	if [[ ! -e "/dev/disk/by-id/$DISK" ]]; then
+	    echo "Couldn't find disk $DISK. Skip."
+	    continue
+	fi
+	if set_disk_timeout $DISK $timeout; then
+	    save_disk_timeout $DISK $timeout
+	fi
+    done
+}
+
+load_disks_timeout()
+{
+    if [[ ! -f $stdby_file ]]; then
+	echo "There is no file $stdby_file to load. Exit."
+	exit 1
+    fi
+    while read LINE; do
+	#echo $LINE
+	DISK=$(echo $LINE | sed "s/\(.*\),[0-9]\+/\1/g") #"
+	timeout=$(echo $LINE | sed "s/.*,\([0-9]\+\)/\1/g") #"
+	#echo $disk
+	#echo $TIMEOUT
+	set_disk_timeout $DISK $timeout
+    done <<< $(cat $stdby_file)
+}
+
+delete_disks_timeout()
+{
+    echo $@
+    for DISK in $@; do 
+	sed -i "/.*$DISK.*/d" $stdby_file
+	if [[ ! -e "/dev/disk/by-id/$DISK" ]]; then
+	    echo "Couldn't find disk $DISK. Skip."
+	    continue
+	fi
+	if ! set_disk_timeout $DISK 253; then
+	    echo "Error setting value 253 to disk $DISK."
+	fi
+    done
+}
+
+show_disks_timeout()
+{
+    if [[ ! -f $stdby_file ]]; then
+	echo "There is no file $stdby_file to load. Exit."
+	exit 1
+    fi
+    printf "%-45s\t%-15s\t  %-6s\n" "Disk" "Standby Timeout" "Online"
+    while read LINE; do
+	#echo $LINE
+	DISK=$(echo $LINE | sed "s/\(.*\),[0-9]\+/\1/g") #"
+	timeout=$(echo $LINE | sed "s/.*,\([0-9]\+\)/\1/g") #"
+	TimeOutHum=$(timeout_to_human_readable $timeout)
+	if [ -e /dev/disk/by-id/$DISK ]; then
+	    ONLINE="Yes"
+	else
+	    ONLINE="No"
+	fi
+	printf "%-45s\t%10s\t  %5s\n" "$DISK" "$TimeOutHum" "$ONLINE"
+    done <<< $(cat $stdby_file)
+}
+
+CMD=""
+while true; do
+    case "$1" in
+	--load|-l)
+	    shift
+	    if [[ "$1" != "--" ]]; then
+		echo "Can't use other commands combined with load!"
+	    else
+		shift
+		load_disks_timeout
+	    fi
+	    break
+	;;
+	--set|-s)
+	    timeout=$2
+	    shift 2
+	    if [[ "$1" != "--" ]]; then
+		echo "Can't use other commands combined with set!"
+	    else
+		shift
+		DISK_LIST=$@
+		#echo "Timeout: $timeout"
+		set_disks_timeout $@
+	    fi
+	    break
+	;;
+	--delete|--del|-d)
+	    shift
+	    if [[ "$1" != "--" ]]; then
+		echo "Can't use other commands combined with delete!"
+	    else
+		shift
+		delete_disks_timeout $@
+	    fi
+	    break
+	;;
+	--show)
+	    shift
+	    if [[ "$1" != "--" ]]; then
+		echo "Can't use other commands combined with show!"
+	    else
+		shift
+		show_disks_timeout $@
+	    fi
+	    break
+	;;
+	--help|-h)
+	    usage
+	;;
+	--)
+	    shift
+	    break
+	;;
+	*)
+	    break
+	;;
+    esac
+done
+
+exit
