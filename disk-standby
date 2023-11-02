@@ -177,7 +177,7 @@ show_disks_timeout()
 	echo "There is no file $stdby_file to load. Exit."
 	exit 1
     fi
-    printf "%-45s\t%-15s\t  %-6s\n" "Disk" "Standby Timeout" "Online"
+    printf "%-45s\t%-15s\t  %-6s   %s\n" "Disk" "Standby Timeout" "Online" "Status"
     while read LINE; do
 	#echo $LINE
 	DISK=$(echo $LINE | sed "s/\(.*\),[0-9]\+/\1/g") #"
@@ -185,10 +185,12 @@ show_disks_timeout()
 	TimeOutHum=$(timeout_to_human_readable $timeout)
 	if [ -e /dev/disk/by-id/$DISK ]; then
 	    ONLINE="Yes"
+	    Status=$(hdparm -C /dev/disk/by-id/$DISK | tail -n 1 | cut -c 19-)
 	else
 	    ONLINE="No"
+	    Status="N/A"
 	fi
-	printf "%-45s\t%10s\t  %5s\n" "$DISK" "$TimeOutHum" "$ONLINE"
+	printf "%-45s\t%8s\t  %5s\t   %s\n" "$DISK" "$TimeOutHum" "$ONLINE" "$Status"
     done <<< $(cat $stdby_file)
 }
 
